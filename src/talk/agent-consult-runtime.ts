@@ -610,7 +610,7 @@ export async function consultRealtimeVoiceAgent(params: {
         }),
         provider: params.provider,
         model: params.model,
-        thinkLevel: params.thinkLevel ?? "high",
+        thinkLevel: params.thinkLevel,
         fastMode: params.fastMode,
         verboseLevel: "off",
         reasoningLevel: "off",
