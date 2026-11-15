@@ -33,6 +33,7 @@ function pageNode(label: string) {
     disabled: false,
     textContent: label,
     click: vi.fn(),
+    getClientRects: () => [{}],
     getAttribute: (name: string) => (name === "aria-label" ? label : null),
   };
 }
@@ -47,6 +48,7 @@ function microphoneSelect(labels: string[]) {
   let value = options[0]?.value;
   return {
     dispatchEvent: vi.fn(),
+    getClientRects: () => [{}],
     options,
     get selectedOptions() {
       return options.filter((option) => option.selected);
@@ -94,6 +96,12 @@ async function runAudioStatus(
       return selector.includes("select") && selector.includes("microphone") ? select : null;
     },
     querySelectorAll(selector: string) {
+      if (selector === 'button[aria-label^="Microphone:" i]') {
+        return [];
+      }
+      if (selector === 'select[aria-label*="microphone" i]') {
+        return [select];
+      }
       if (selector === "audio, video") {
         return [media];
       }

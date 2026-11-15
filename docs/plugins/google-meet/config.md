@@ -64,6 +64,54 @@ The common Chrome agent path only needs the plugin enabled, BlackHole, SoX, a re
 
 An `openclaw doctor --fix` migration exists for the legacy `realtime.provider: "google"` shape: it moves that intent to `realtime.voiceProvider: "google"` plus `realtime.transcriptionProvider: "openai"` when those fields are not already set.
 
+### Linux native listening with a separate playback device
+
+For an explicit `chrome.audioInputCommand`, keep participant playback separate
+from the virtual microphone receiving assistant speech. A PipeWire-Pulse null
+sink can provide that listening device:
+
+```bash
+pactl load-module module-null-sink sink_name=openclaw_meeting_playback sink_properties=device.description=OpenClaw_Meeting_Audio_Speaker
+```
+
+Persist the device through your user audio-service configuration if it must
+survive an audio-service restart. Keep the existing `OpenClaw Meeting Audio`
+microphone for assistant injection. The Meet adapter prefers a speaker named
+`OpenClaw Meeting Audio Speaker` (spaces or underscores) for participant playback.
+
+```json5
+{
+  plugins: {
+    entries: {
+      "google-meet": {
+        config: {
+          chrome: {
+            audioInputCommand: [
+              "parec",
+              "--device=openclaw_meeting_playback.monitor",
+              "--format=s16le",
+              "--rate=24000",
+              "--channels=1",
+              "--latency-msec=20",
+              "--raw",
+            ],
+          },
+          realtime: { introMessage: "" },
+        },
+      },
+    },
+  },
+}
+```
+
+This command supplies native participant input while the meeting engine remains
+active, including after the initiating CLI or agent tool request returns. The
+empty intro joins silently; admit the participant before requesting speech.
+Verify listening and remote audibility in a real meeting. Local output bytes or
+a successful setup check alone do not prove that another participant heard it.
+An explicit input command uses the documented custom-input path and does not
+provide the managed isolation required by GPT-Live.
+
 ### GPT-Live with Cove
 
 Select `bidi` mode for GPT-Live speech. `agent` mode continues to use realtime

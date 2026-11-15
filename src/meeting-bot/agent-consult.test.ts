@@ -1,4 +1,9 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import {
+  resetGatewayWorkAdmission,
+  tryBeginGatewayRootWorkAdmission,
+} from "../process/gateway-work-admission.js";
+import { beginSessionWorkAdmission } from "../sessions/session-lifecycle-admission.js";
 import type { RealtimeVoiceBridgeSession } from "../talk/session-runtime.js";
 
 const consultRealtimeVoiceAgent = vi.hoisted(() => vi.fn(async () => ({ text: "done" })));
@@ -65,7 +70,57 @@ function makeSession(
 
 describe("createMeetingRealtimeEngineBindings", () => {
   beforeEach(() => {
-    consultRealtimeVoiceAgent.mockClear();
+    resetGatewayWorkAdmission();
+    consultRealtimeVoiceAgent.mockReset();
+    consultRealtimeVoiceAgent.mockResolvedValue({ text: "done" });
+  });
+
+  it("admits a participant question after its initiating join request finishes", async () => {
+    consultRealtimeVoiceAgent.mockImplementation(async () => {
+      const work = await beginSessionWorkAdmission({
+        scope: "test:meeting-consult",
+        identities: ["question"],
+      });
+      try {
+        return await work.run(async () => ({ text: "Two plus two is four." }));
+      } finally {
+        work.release();
+      }
+    });
+    const join = tryBeginGatewayRootWorkAdmission("test:meeting-join");
+    if (!join) {
+      throw new Error("Expected the join request to be admitted");
+    }
+    let ask = () => {};
+    const question = new Promise<void>((resolve) => {
+      ask = resolve;
+    });
+    const answer = join.run(async () => {
+      await question;
+      return await createBindings("Support").consultAgent({
+        meetingSessionId: "meeting-after-join",
+        args: { question: "What is two plus two?" },
+        transcript: [],
+      });
+    });
+    join.release();
+    ask();
+
+    await expect(answer).resolves.toEqual({ text: "Two plus two is four." });
+  });
+
+  it("does not start agent work after the meeting has been stopped", async () => {
+    const controller = new AbortController();
+    controller.abort(new Error("Meeting stopped"));
+    await expect(
+      createBindings("Support").consultAgent({
+        meetingSessionId: "stopped-meeting",
+        args: { question: "What is two plus two?" },
+        transcript: [],
+        abortSignal: controller.signal,
+      }),
+    ).rejects.toThrow("Meeting stopped");
+    expect(consultRealtimeVoiceAgent).not.toHaveBeenCalled();
   });
 
   it("targets the configured default agent when agentId is omitted", async () => {
