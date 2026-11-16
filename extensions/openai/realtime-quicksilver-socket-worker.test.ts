@@ -165,7 +165,7 @@ describe("GPT-Live socket worker", () => {
 
 // Managed proxy hooks live only in the Gateway isolate; the media worker sees the env.
 describe("GPT-Live socket worker managed proxy", () => {
-  it("tunnels media through the managed proxy and exchanges audio", async () => {
+  it("tunnels plugin-scoped audio through the managed proxy and exchanges audio", async () => {
     const target = await startAudioEchoTarget();
     const proxy = await startForwardProxy(true);
     stubManagedProxyEnv(proxy.url, "gateway-only");
@@ -180,7 +180,12 @@ describe("GPT-Live socket worker managed proxy", () => {
     const socket = OpenAIQuicksilverWorkerSocket.create(
       `ws://${authority}`,
       { maxPayload: 1024 * 1024 },
-      { model: "gpt-live-1", paced: true },
+      {
+        model: "gpt-live-1",
+        paced: true,
+        // Plugin-owned bridge requests carry proxies that Worker must not receive.
+        audioFormat: new Proxy({ encoding: "pcm16", sampleRateHz: 24_000, channels: 1 }, {}),
+      },
       {
         onAudio: (chunk) => {
           audio.push(chunk);
