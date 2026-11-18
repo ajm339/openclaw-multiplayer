@@ -184,7 +184,10 @@ describe("GPT-Live socket worker managed proxy", () => {
         model: "gpt-live-1",
         paced: true,
         // Plugin-owned bridge requests carry proxies that Worker must not receive.
-        audioFormat: new Proxy({ encoding: "pcm16", sampleRateHz: 24_000, channels: 1 }, {}),
+        audioFormat: new Proxy(
+          { encoding: "pcm16", sampleRateHz: 24_000, channels: 1 } as const,
+          {},
+        ),
       },
       {
         onAudio: (chunk) => {

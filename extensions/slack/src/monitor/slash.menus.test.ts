@@ -30,7 +30,8 @@ import {
 } from "./slash.commands.test-harness.js";
 import { firstCallPayload, getSlackSlashMocks } from "./slash.test-harness.js";
 
-vi.mock("openclaw/plugin-sdk/models-provider-runtime", () => ({
+vi.mock("openclaw/plugin-sdk/models-provider-runtime", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("openclaw/plugin-sdk/models-provider-runtime")>()),
   buildPreparedModelsProviderData: vi.fn(async () => ({
     providers: ["openai"],
     byProvider: new Map([["openai", new Set(["test-beta", "test-alpha"])]]),
