@@ -35,13 +35,10 @@ import type {
 import type { ResolvedAgentRoute } from "openclaw/plugin-sdk/routing";
 import { danger, logVerbose, warn } from "openclaw/plugin-sdk/runtime-env";
 import { normalizeLowercaseStringOrEmpty } from "openclaw/plugin-sdk/string-coerce-runtime";
-import { chunkItems } from "openclaw/plugin-sdk/text-chunking";
 import { resolveSlackAccount, type ResolvedSlackAccount } from "../accounts.js";
 import { buildSlackCompleteBlocksFallbackText } from "../blocks-fallback.js";
-import { SLACK_MAX_BLOCKS } from "../blocks-input.js";
 import { requireSlackPostMessageTimestamp } from "../client-delivery.js";
 import { formatSlackError } from "../errors.js";
-import { truncateSlackText } from "../truncate.js";
 import { resolveSlackCommandIngress, resolveSlackEffectiveAllowFrom } from "./auth.js";
 import { resolveSlackChannelConfig, type SlackChannelConfigResolved } from "./channel-config.js";
 import { buildSlackSlashCommandMatcher, resolveSlackSlashCommandConfig } from "./commands.js";
@@ -53,38 +50,40 @@ import {
 import { resolveSlackDeferredActionTarget } from "./deferred-action-routing.js";
 import { authorizeSlackDirectMessage } from "./dm-auth.js";
 import { resolveSlackMonitorEventScope } from "./event-scope.js";
-import {
-  createSlackExternalArgMenuStore,
-  SLACK_EXTERNAL_ARG_MENU_PREFIX,
-  type SlackExternalArgMenuChoice,
-} from "./external-arg-menu-store.js";
+import { createSlackExternalArgMenuStore } from "./external-arg-menu-store.js";
 import { resolveSlackSenderAuthentication } from "./ingress.js";
 import { resolveSlackSessionEventRoutingContext } from "./message-handler/prepare-routing.js";
-import { escapeSlackMrkdwn } from "./mrkdwn.js";
 import {
   createSlackResponseUrlBudget,
   SlackResponseAlreadyReportedError,
 } from "./response-url-budget.js";
 import { resolveSlackRoomContextHints } from "./room-context.js";
 import { captureSlackSessionTargetGuard } from "./session-run-targets.js";
-import { resolveSlackCommandMenuModelContext } from "./slash-menu-model-context.js";
+import {
+  buildSlackArgMenuOptions,
+  buildSlackCommandArgMenuBlocks,
+  parseSlackCommandArgValue,
+  SLACK_COMMAND_ARG_ACTION_ID,
+  SLACK_COMMAND_ARG_ACTION_LISTENER,
+  SLACK_COMMAND_ARG_SELECT_OPTIONS_MAX,
+} from "./slash-arg-menus.js";
+import {
+  resolveSlackCommandMenuModelContext,
+  resolveSlackCommandModelChoices,
+} from "./slash-menu-model-context.js";
 import type { SlackCommandInvocation } from "./types.js";
 
-const SLACK_COMMAND_ARG_ACTION_ID = "openclaw_cmdarg";
-const SLACK_COMMAND_ARG_ACTION_LISTENER = /^openclaw_cmdarg/;
-const SLACK_COMMAND_ARG_VALUE_PREFIX = "cmdarg";
-const SLACK_COMMAND_ARG_BUTTON_ROW_SIZE = 5;
-const SLACK_COMMAND_ARG_OVERFLOW_MIN = 3;
-const SLACK_COMMAND_ARG_OVERFLOW_MAX = 5;
-const SLACK_COMMAND_ARG_SELECT_OPTIONS_MAX = 100;
-const SLACK_COMMAND_ARG_SELECT_OPTION_TEXT_MAX = 75;
-const SLACK_COMMAND_ARG_SELECT_OPTION_VALUE_MAX = 150;
-const SLACK_COMMAND_ARG_BUTTON_TEXT_MAX = 75;
-const SLACK_COMMAND_ARG_BUTTON_VALUE_MAX = 2000;
-const SLACK_COMMAND_ARG_CONFIRM_TEXT_MAX = 300;
-const SLACK_HEADER_TEXT_MAX = 150;
-const SLACK_COMMAND_ARG_CHROME_BLOCKS = 3;
-const SLACK_COMMAND_ARG_ACTION_BLOCKS_MAX = SLACK_MAX_BLOCKS - SLACK_COMMAND_ARG_CHROME_BLOCKS;
+const SLACK_CONTROL_CHOICES = [
+  { value: "model", label: "Change model" },
+  { value: "think", label: "Thinking level" },
+  { value: "compact", label: "Compact context" },
+  { value: "new", label: "Clear context / new session" },
+  { value: "stop", label: "Stop current run" },
+  { value: "agentstatus", label: "Status and usage" },
+  { value: "context", label: "Context details" },
+  { value: "verbose", label: "Response detail" },
+  { value: "commands", label: "All commands" },
+];
 
 type SlackCommandHandlerArgs = SlackCommandMiddlewareArgs &
   Pick<AllMiddlewareArgs, "context" | "client">;
@@ -105,187 +104,6 @@ const loadPluginCommandRuntime = createLazyRuntimeModule(
 );
 
 const slackExternalArgMenuStore = createSlackExternalArgMenuStore();
-
-function buildSlackArgMenuConfirm(params: { command: string; arg: string }) {
-  const command = escapeSlackMrkdwn(params.command);
-  const arg = escapeSlackMrkdwn(params.arg);
-  return {
-    title: { type: "plain_text", text: "Confirm selection" },
-    text: {
-      type: "mrkdwn",
-      text: truncateSlackText(
-        `Run */${command}* with *${arg}* set to this value?`,
-        SLACK_COMMAND_ARG_CONFIRM_TEXT_MAX,
-      ),
-    },
-    confirm: { type: "plain_text", text: "Run command" },
-    deny: { type: "plain_text", text: "Cancel" },
-  };
-}
-
-function encodeSlackCommandArgValue(parts: {
-  command: string;
-  arg: string;
-  value: string;
-  userId: string;
-}) {
-  return [
-    SLACK_COMMAND_ARG_VALUE_PREFIX,
-    encodeURIComponent(parts.command),
-    encodeURIComponent(parts.arg),
-    encodeURIComponent(parts.value),
-    encodeURIComponent(parts.userId),
-  ].join("|");
-}
-
-function parseSlackCommandArgValue(raw?: string | null): {
-  command: string;
-  arg: string;
-  value: string;
-  userId: string;
-} | null {
-  if (!raw) {
-    return null;
-  }
-  const parts = raw.split("|");
-  if (parts.length !== 5 || parts[0] !== SLACK_COMMAND_ARG_VALUE_PREFIX) {
-    return null;
-  }
-  try {
-    const [command, arg, value, userId] = parts.slice(1).map(decodeURIComponent);
-    return command && arg && value && userId ? { command, arg, value, userId } : null;
-  } catch {
-    return null;
-  }
-}
-
-function buildSlackArgMenuOptions(choices: SlackExternalArgMenuChoice[]) {
-  return choices.map((choice) => ({
-    text: {
-      type: "plain_text" as const,
-      text: truncateSlackText(choice.label, SLACK_COMMAND_ARG_SELECT_OPTION_TEXT_MAX),
-    },
-    value: choice.value,
-  }));
-}
-
-function buildSlackCommandArgMenuBlocks(params: {
-  title: string;
-  command: string;
-  arg: string;
-  choices: Array<{ value: string; label: string }>;
-  userId: string;
-  supportsExternalSelect: boolean;
-  createExternalMenuToken: (choices: SlackExternalArgMenuChoice[]) => string;
-}) {
-  const encodedChoices = params.choices.map((choice) => ({
-    label: choice.label,
-    value: encodeSlackCommandArgValue({
-      command: params.command,
-      arg: params.arg,
-      value: choice.value,
-      userId: params.userId,
-    }),
-  }));
-  const canUseStaticSelect = encodedChoices.every(
-    (choice) => choice.value.length <= SLACK_COMMAND_ARG_SELECT_OPTION_VALUE_MAX,
-  );
-  const canUseOverflow =
-    canUseStaticSelect &&
-    encodedChoices.length >= SLACK_COMMAND_ARG_OVERFLOW_MIN &&
-    encodedChoices.length <= SLACK_COMMAND_ARG_OVERFLOW_MAX;
-  const canUseExternalSelect =
-    params.supportsExternalSelect &&
-    canUseStaticSelect &&
-    encodedChoices.length > SLACK_COMMAND_ARG_SELECT_OPTIONS_MAX;
-  const confirm = buildSlackArgMenuConfirm({ command: params.command, arg: params.arg });
-  const selectElement = { action_id: SLACK_COMMAND_ARG_ACTION_ID, confirm };
-  const rows = canUseOverflow
-    ? [
-        {
-          elements: [
-            {
-              ...selectElement,
-              type: "overflow",
-              options: buildSlackArgMenuOptions(encodedChoices),
-            },
-          ],
-        },
-      ]
-    : canUseExternalSelect
-      ? [
-          {
-            block_id: `${SLACK_EXTERNAL_ARG_MENU_PREFIX}${params.createExternalMenuToken(encodedChoices)}`,
-            elements: [
-              {
-                ...selectElement,
-                type: "external_select",
-                min_query_length: 0,
-                placeholder: { type: "plain_text", text: `Search ${params.arg}` },
-              },
-            ],
-          },
-        ]
-      : encodedChoices.length <= SLACK_COMMAND_ARG_BUTTON_ROW_SIZE || !canUseStaticSelect
-        ? chunkItems(
-            encodedChoices.filter(
-              (choice) => choice.value.length <= SLACK_COMMAND_ARG_BUTTON_VALUE_MAX,
-            ),
-            SLACK_COMMAND_ARG_BUTTON_ROW_SIZE,
-          ).map((choices, rowIndex) => ({
-            elements: choices.map((choice, colIndex) => ({
-              type: "button",
-              action_id: `${SLACK_COMMAND_ARG_ACTION_ID}_${rowIndex}_${colIndex}`,
-              text: {
-                type: "plain_text",
-                text: truncateSlackText(choice.label, SLACK_COMMAND_ARG_BUTTON_TEXT_MAX),
-              },
-              value: choice.value,
-              confirm,
-            })),
-          }))
-        : chunkItems(encodedChoices, SLACK_COMMAND_ARG_SELECT_OPTIONS_MAX).map(
-            (choices, index) => ({
-              elements: [
-                {
-                  ...selectElement,
-                  type: "static_select",
-                  placeholder: {
-                    type: "plain_text",
-                    text:
-                      index === 0 ? `Choose ${params.arg}` : `Choose ${params.arg} (${index + 1})`,
-                  },
-                  options: buildSlackArgMenuOptions(choices),
-                },
-              ],
-            }),
-          );
-  const headerText = truncateSlackText(
-    `/${params.command}: choose ${params.arg}`,
-    SLACK_HEADER_TEXT_MAX,
-  );
-  const sectionText = truncateSlackText(params.title, 3000);
-  const contextText = truncateSlackText(
-    `Select one option to continue /${params.command} (${params.arg})`,
-    3000,
-  );
-  const visibleRows = rows.slice(0, SLACK_COMMAND_ARG_ACTION_BLOCKS_MAX);
-  return [
-    {
-      type: "header",
-      text: { type: "plain_text", text: headerText },
-    },
-    {
-      type: "section",
-      text: { type: "mrkdwn", text: sectionText },
-    },
-    {
-      type: "context",
-      elements: [{ type: "mrkdwn", text: contextText }],
-    },
-    ...visibleRows.map((row) => Object.assign({ type: "actions" }, row)),
-  ];
-}
 
 type SlackCommandRegistration =
   | { mode: "single"; name: string }
@@ -342,7 +160,7 @@ export function createSlackCommandHandler(params: {
         return false;
       }
       trackEvent?.();
-      if (!prompt.trim()) {
+      if (!prompt.trim() && !supportsInteractiveArgMenus) {
         await ack({
           text: "Message required.",
           response_type: "ephemeral",
@@ -525,14 +343,41 @@ export function createSlackCommandHandler(params: {
         return resolvedSlashRoute;
       };
 
+      if (!prompt.trim() && supportsInteractiveArgMenus) {
+        if (!commandAuthorized) {
+          await respondEphemeral("You are not authorized to use these controls.");
+          return false;
+        }
+        await respond({
+          text: "Agent controls",
+          response_type: "ephemeral",
+          blocks: buildSlackCommandArgMenuBlocks({
+            title: "Choose a setting or action for this conversation.",
+            header: "Agent controls",
+            context:
+              "Model and thinking changes apply to this conversation. Clear context starts a fresh session.",
+            command: "controls",
+            arg: "action",
+            choices: SLACK_CONTROL_CHOICES,
+            userId: command.user_id,
+            preferSelect: true,
+            supportsExternalSelect: false,
+            createExternalMenuToken: () => "",
+          }),
+        });
+        return false;
+      }
+
       if (commandDefinition && supportsInteractiveArgMenus) {
         const menuNeedsModelContext =
           !(commandArgs?.raw && !commandArgs.values) &&
           commandDefinition.args?.some(
             (arg) => typeof arg.choices === "function" && commandArgs?.values?.[arg.name] == null,
           );
+        const needsModelPicker =
+          commandDefinition.key === "model" && !commandArgs?.raw && !commandArgs?.values?.model;
         const menuRoute =
-          menuNeedsModelContext || commandDefinition.key === "verbose"
+          needsModelPicker || menuNeedsModelContext || commandDefinition.key === "verbose"
             ? await resolveSlashRoute()
             : undefined;
         const menuModelContext =
@@ -557,7 +402,7 @@ export function createSlackCommandHandler(params: {
                 readOnly: true,
               })
             : undefined;
-        const menu = await resolveCommandArgMenuAsync({
+        let menu = await resolveCommandArgMenuAsync({
           command: commandDefinition,
           args: commandArgs,
           cfg,
@@ -565,12 +410,30 @@ export function createSlackCommandHandler(params: {
           ...menuModelContext,
           catalog: menuModelCatalog,
         });
+        if (needsModelPicker && menuRoute) {
+          const choices = await resolveSlackCommandModelChoices({
+            cfg,
+            agentId: menuRoute.agentId,
+            sessionKey: menuRoute.sessionKey,
+          });
+          if (choices.length === 0) {
+            await respondEphemeral(
+              "No available models were found. Check your provider authentication.",
+            );
+            return false;
+          }
+          const arg = commandDefinition.args?.find((candidate) => candidate.name === "model");
+          if (arg) {
+            menu = { arg, choices };
+          }
+        }
         if (menu) {
           const route = menuRoute ?? (await resolveSlashRoute());
           const commandLabel = commandDefinition.nativeName ?? commandDefinition.key;
           const title = formatCommandArgMenuTitle({ command: commandDefinition, menu });
           const blocks = buildSlackCommandArgMenuBlocks({
             title,
+            preferSelect: slashCommand.enabled || needsModelPicker,
             command: commandLabel,
             arg: menu.arg.name,
             choices: menu.choices,
@@ -927,7 +790,21 @@ export async function registerSlackMonitorSlashCommands(params: {
   }
 
   if (registration.mode === "single") {
-    registerCommand(buildSlackSlashCommandMatcher(registration.name));
+    registerCommand(buildSlackSlashCommandMatcher(registration.name), (cmd) => {
+      const text = cmd.text?.trim() ?? "";
+      const match = text.match(/^\/?([a-z][a-z0-9-]*)(?:\s+(.*))?$/is);
+      const commandName = match?.[1]?.toLowerCase();
+      const definition = commandName ? findCommandByNativeName(commandName, "slack") : undefined;
+      if (!definition) {
+        return { prompt: text };
+      }
+      const commandArgs = parseCommandArgs(definition, match?.[2] ?? "");
+      return {
+        prompt: buildCommandTextFromArgs(definition, commandArgs),
+        commandArgs,
+        commandDefinition: definition,
+      };
+    });
   } else if (registration.mode === "native") {
     if (!pluginCommandRuntimeModule) {
       throw new Error("Missing command runtimes for native Slack commands.");
@@ -965,7 +842,7 @@ export async function registerSlackMonitorSlashCommands(params: {
     logVerbose("slack: slash commands disabled");
   }
 
-  if (registration.mode !== "native" || !supportsInteractiveArgMenus) {
+  if (registration.mode === "disabled" || !supportsInteractiveArgMenus) {
     return registration;
   }
 
@@ -1080,10 +957,18 @@ export async function registerSlackMonitorSlashCommands(params: {
       });
       return;
     }
-    const commandDefinition = findCommandByNativeName(parsed.command, "slack");
-    const commandArgs: CommandArgs = {
-      values: { [parsed.arg]: parsed.value },
-    };
+    const isControl = parsed.command === "controls" && parsed.arg === "action";
+    if (isControl && !SLACK_CONTROL_CHOICES.some((choice) => choice.value === parsed.value)) {
+      await respondFn({ text: "That control is no longer available.", response_type: "ephemeral" });
+      return;
+    }
+    const commandName = isControl ? parsed.value : parsed.command;
+    const commandDefinition = findCommandByNativeName(commandName, "slack");
+    const commandArgs: CommandArgs | undefined = isControl
+      ? undefined
+      : {
+          values: { [parsed.arg]: parsed.value },
+        };
     const prompt = commandDefinition
       ? buildCommandTextFromArgs(commandDefinition, commandArgs)
       : `/${parsed.command} ${parsed.value}`;
@@ -1112,6 +997,7 @@ export async function registerSlackMonitorSlashCommands(params: {
       body,
       eventScope,
       senderAuthentication: resolveSlackSenderAuthentication(args.context),
+      threadTs: body.container?.thread_ts ?? body.message?.thread_ts,
       prompt,
       commandArgs,
       commandDefinition: commandDefinition ?? undefined,
