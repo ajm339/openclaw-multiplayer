@@ -4,6 +4,7 @@ import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createDeferred } from "../../test/helpers/promise.js";
 import type { RunEmbeddedAgentParams } from "../agents/embedded-agent-runner/run/params.js";
+import { resolveInitialThinkLevel } from "../agents/embedded-agent-runner/run/runtime-resolution.js";
 import { setReplyPayloadMetadata } from "../auto-reply/reply-payload.js";
 import type { SessionEntry } from "../config/sessions/types.js";
 import {
@@ -312,6 +313,47 @@ describe("realtime voice agent consult runtime", () => {
     await waitForDiagnosticEventsDrained();
     expect(resolveClientVoiceRunBinding(runId)).toBeUndefined();
   });
+
+  it.each([
+    { defaults: "low", agent: undefined, explicit: undefined, expected: "low" },
+    { defaults: "high", agent: "low", explicit: undefined, expected: "low" },
+    { defaults: "low", agent: "low", explicit: "medium", expected: "medium" },
+    { defaults: undefined, agent: undefined, explicit: undefined, expected: "medium" },
+  ] as const)(
+    "uses the configured voice reasoning level: $defaults / $agent / $explicit -> $expected",
+    async ({ defaults, agent, explicit, expected }) => {
+      const { runtime, runEmbeddedAgent } = createAgentRuntime();
+      runEmbeddedAgent.mockImplementation(async (params) => ({
+        payloads: [
+          {
+            text: resolveInitialThinkLevel({
+              requested: params?.thinkLevel,
+              config: params?.config,
+              agentId: params?.agentId,
+              provider: "test",
+              modelId: "test-model",
+              model: { reasoning: true },
+            }),
+          },
+        ],
+        meta: {},
+      }));
+      const result = await runConsult({
+        cfg: {
+          agents: {
+            defaults: { thinkingDefault: defaults },
+            entries: { operator: { thinkingDefault: agent } },
+          },
+        },
+        agentRuntime: runtime as never,
+        sessionKey: "agent:operator:subagent:google-meet:reasoning",
+        runIdPrefix: "meeting-reasoning",
+        args: { question: "What is two plus two?" },
+        thinkLevel: explicit,
+      });
+      expect(result).toEqual({ text: expected });
+    },
+  );
 
   it("runs an embedded agent using the shared session and prompt contract", async () => {
     const { runtime, runEmbeddedAgent, sessionStore } = createAgentRuntime([

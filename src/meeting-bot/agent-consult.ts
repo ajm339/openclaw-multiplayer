@@ -3,6 +3,7 @@ import { resolveDefaultAgentId } from "../agents/agent-scope-config.js";
 import type { OpenClawConfig } from "../config/config.js";
 import { formatErrorMessage } from "../infra/errors.js";
 import type { PluginRuntime, RuntimeLogger } from "../plugins/runtime/types.js";
+import { runWithGatewayIndependentRootWorkAdmission } from "../process/gateway-work-admission.js";
 import { normalizeAgentId } from "../routing/session-key.js";
 import { consultRealtimeVoiceAgent } from "../talk/agent-consult-runtime.js";
 import {
@@ -98,27 +99,34 @@ async function consultMeetingAgent(
   const requesterSessionKey =
     normalizeOptionalString(params.requesterSessionKey) ?? `agent:${agentId}:main`;
   const sessionKey = `agent:${agentId}:subagent:${params.surface.id}:${params.meetingSessionId}`;
-  return await consultRealtimeVoiceAgent({
-    cfg: params.config,
-    agentRuntime: params.runtime.agent,
-    logger: params.logger,
-    agentId,
-    sessionKey,
-    messageProvider: params.surface.provider,
-    lane: params.surface.lane,
-    runIdPrefix: `${params.surface.id}:${params.meetingSessionId}`,
-    spawnedBy: requesterSessionKey,
-    contextMode: "fork",
-    args: params.args,
-    transcript: params.transcript,
-    surface: params.surface.surface,
-    userLabel: params.surface.userLabel,
-    assistantLabel: params.surface.assistantLabel,
-    questionSourceLabel: params.surface.questionSourceLabel,
-    toolsAllow: resolveRealtimeVoiceAgentConsultToolsAllow(params.toolPolicy),
-    extraSystemPrompt: params.surface.extraSystemPrompt,
-    abortSignal: params.abortSignal,
-  });
+  // Participant turns outlive the RPC that joined the meeting. Admit each new
+  // question independently while keeping its meeting cancellation signal.
+  return await runWithGatewayIndependentRootWorkAdmission(
+    () =>
+      consultRealtimeVoiceAgent({
+        cfg: params.config,
+        agentRuntime: params.runtime.agent,
+        logger: params.logger,
+        agentId,
+        sessionKey,
+        messageProvider: params.surface.provider,
+        lane: params.surface.lane,
+        runIdPrefix: `${params.surface.id}:${params.meetingSessionId}`,
+        spawnedBy: requesterSessionKey,
+        contextMode: "fork",
+        args: params.args,
+        transcript: params.transcript,
+        surface: params.surface.surface,
+        userLabel: params.surface.userLabel,
+        assistantLabel: params.surface.assistantLabel,
+        questionSourceLabel: params.surface.questionSourceLabel,
+        toolsAllow: resolveRealtimeVoiceAgentConsultToolsAllow(params.toolPolicy),
+        extraSystemPrompt: params.surface.extraSystemPrompt,
+        abortSignal: params.abortSignal,
+      }),
+    `meeting-consult:${params.surface.id}`,
+    params.abortSignal,
+  );
 }
 
 async function handleMeetingRealtimeConsultToolCall(

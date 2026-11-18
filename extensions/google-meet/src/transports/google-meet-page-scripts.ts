@@ -78,6 +78,18 @@ export function meetStatusScript(params: {
     node?.innerText,
   ].filter(Boolean).join(' ').trim();
   const waitForUi = () => new Promise((resolve) => setTimeout(resolve, 100));
+  if (!readOnly) {
+    const camera = findCallControlButton(/^\\s*turn off camera\\b/i);
+    if (camera) {
+      camera.click();
+      await waitForUi();
+      notes.push("Disabled Meet camera for the audio-only meeting participant.");
+    }
+    const cameraDialog = [...document.querySelectorAll('[role="dialog"]')].find((dialog) =>
+      /camera not found/i.test(text(dialog)) && dialog.getClientRects().length > 0
+    );
+    cameraDialog?.querySelector('button[aria-label="Close"]')?.click();
+  }
   const input = [...document.querySelectorAll('input')].find((el) =>
     /your name/i.test(el.getAttribute('aria-label') || el.placeholder || '')
   );
@@ -113,6 +125,7 @@ export function meetStatusScript(params: {
   }
   const findMicrophoneDeviceControl = () => {
     const selectors = [
+      'button[aria-label^="Microphone:" i]',
       'select[aria-label*="microphone" i]',
       'select[name*="microphone" i]',
       '[role="combobox"][aria-label*="microphone" i]',
@@ -120,7 +133,7 @@ export function meetStatusScript(params: {
       '[aria-haspopup="listbox"][aria-label*="microphone" i]',
     ];
     for (const selector of selectors) {
-      const control = document.querySelector(selector);
+      const control = [...document.querySelectorAll(selector)].find((node) => node.getClientRects().length > 0);
       if (control) return control;
     }
     return undefined;
@@ -209,7 +222,11 @@ export function meetStatusScript(params: {
         return;
       }
       await openMicrophoneDeviceSettings();
-      const control = findMicrophoneDeviceControl();
+      let control = findMicrophoneDeviceControl();
+      for (let attempt = 0; !control && attempt < 20; attempt += 1) {
+        await waitForUi();
+        control = findMicrophoneDeviceControl();
+      }
       if (!control) {
         audioInputRouted = false;
         audioInputRouteError = 'Meet microphone device selector was not available.';
@@ -231,7 +248,7 @@ export function meetStatusScript(params: {
           '[role="option"], [role="menuitemradio"], [role="radio"]'
         )];
         const choice = choices.find(
-          (node) => audioDeviceFamily(deviceNodeLabel(node)) === inputFamily && !node.disabled
+          (node) => audioDeviceFamily(deviceNodeLabel(node)) === inputFamily && !node.disabled && node.getClientRects().length > 0
         );
         choice?.click?.();
       }
@@ -295,12 +312,14 @@ export function meetStatusScript(params: {
       !navigator.mediaDevices?.enumerateDevices
     ) return;
     const mediaElements = [...document.querySelectorAll('audio, video')]
-      .filter((el) => typeof el.setSinkId === 'function');
-    if (mediaElements.length === 0) return;
+      .filter((el) => typeof el.setSinkId === 'function')
+      .filter((el) => !el.srcObject?.getAudioTracks || el.srcObject.getAudioTracks().length > 0);
     try {
       const devices = await navigator.mediaDevices.enumerateDevices();
       const inputFamily = audioDeviceFamily(audioInputDeviceLabel);
       const output = devices.find((device) =>
+        device.kind === 'audiooutput' && /OpenClaw[ _]Meeting[ _]Audio[ _]Speaker/i.test(device.label)
+      ) || devices.find((device) =>
         device.kind === 'audiooutput' &&
         inputFamily &&
         audioDeviceFamily(device.label) === inputFamily
@@ -312,6 +331,30 @@ export function meetStatusScript(params: {
         if (devices.some((device) => device.kind === 'audiooutput')) {
           notes.push("A supported virtual speaker output was not visible to Meet.");
         }
+        return;
+      }
+      if (mediaElements.length === 0) {
+        const findSpeaker = () => buttons().find((button) =>
+          /^\\s*speaker:/i.test(buttonLabel(button)) && button.getClientRects().length > 0
+        );
+        const speakerMatches = (node) => Boolean(node && [
+          (node.getAttribute('aria-label') || '').replace(/^speaker:\\s*/i, '').trim(),
+          text(node),
+        ].includes(output.label));
+        let speakerControl = findSpeaker();
+        if (!readOnly && speakerControl && !speakerMatches(speakerControl)) {
+          speakerControl.click();
+          await waitForUi();
+          const choice = [...document.querySelectorAll('[role="menuitemradio"], [role="option"]')].find((node) =>
+            node.getClientRects().length > 0 && speakerMatches(node)
+          );
+          choice?.click();
+          await waitForUi();
+          speakerControl = findSpeaker();
+        }
+        audioOutputRouted = speakerMatches(speakerControl);
+        audioOutputDeviceLabel = output.label || "OpenClaw meeting audio";
+        if (audioOutputRouted) notes.push("Verified Meet speaker selection; waiting for incoming participant audio.");
         return;
       }
       let routed = 0;
