@@ -206,6 +206,13 @@ Slash commands appear in Slack as either a single configured command or multiple
 /openclaw /help
 ```
 
+Send the configured command without arguments (for example, `/openclaw`) to open
+the controls dropdown. Choose a model, thinking level, or session action from the
+menus. `/openclaw model` and `/openclaw think` also open their dropdowns directly;
+the inner slash is optional for built-in commands. Model choices use the current
+agent's available catalog, and thinking choices follow the conversation's model.
+Clear context starts a fresh session while retaining archived history.
+
 Native commands require [additional manifest settings](/channels/slack/manifest-and-scopes#additional-manifest-settings) in your Slack app and are enabled with `channels.slack.commands.native: true` or `commands.native: true` in global configurations instead.
 
 - Native command auto-mode is **off** for Slack so `commands.native: "auto"` does not enable Slack native commands.

@@ -5,8 +5,10 @@ import {
   type PluginCommandCatalogDecision,
   type PluginCommandDispatch,
 } from "openclaw/plugin-sdk/plugin-command-runtime";
+import { composeSessionEntryCommitGuards } from "openclaw/plugin-sdk/session-binding-runtime";
 import * as sessionStore from "openclaw/plugin-sdk/session-store-runtime";
 import { beforeAll, beforeEach, describe, expect, it, onTestFinished, vi } from "vitest";
+import * as sessionEventRouting from "./message-handler/prepare-routing.js";
 import {
   createArgMenusHarness,
   createSlashCommand,
@@ -27,6 +29,15 @@ import {
   setAsyncDispatchMock,
 } from "./slash.commands.test-harness.js";
 import { firstCallPayload, getSlackSlashMocks } from "./slash.test-harness.js";
+
+vi.mock("openclaw/plugin-sdk/models-provider-runtime", () => ({
+  buildPreparedModelsProviderData: vi.fn(async () => ({
+    providers: ["openai"],
+    byProvider: new Map([["openai", new Set(["test-beta", "test-alpha"])]]),
+    modelNames: new Map([["openai/test-alpha", "Test Alpha"]]),
+    isCurrent: () => true,
+  })),
+}));
 
 const { dispatchMock } = getSlackSlashMocks();
 const { pluginCommandFixtures, skillCommandFixtures } = getSlackCommandFixtures();
@@ -130,8 +141,82 @@ describe("Slack native command argument menus", () => {
       ),
     ).toBe(true);
     expect(configuredHarness.commands.has("/usage")).toBe(false);
-    expect(configuredHarness.actions.size).toBe(0);
-    expect(configuredHarness.options.size).toBe(0);
+    expect(configuredHarness.actions.size).toBe(1);
+    expect(configuredHarness.options.size).toBe(1);
+  });
+
+  it("opens controls and model choices through the single configured command", async () => {
+    const single = createArgMenusHarness();
+    single.ctx.slashCommand.enabled = true;
+    await registerCommands(single.ctx, single.account);
+    const handler = [...single.commands.values()][0]!;
+    const actionHandler = requireHandler(single.actions, /^openclaw_cmdarg/, "controls action");
+    const { respond } = await runCommandHandler(handler);
+    const menu = firstCallPayload(respond, "controls") as {
+      blocks: Array<{
+        type: string;
+        elements?: Array<{
+          type: string;
+          options?: Array<{ text: { text: string }; value: string }>;
+        }>;
+      }>;
+    };
+    const select = menu.blocks.find((block) => block.type === "actions")?.elements?.[0];
+    expect(select?.type).toBe("static_select");
+    expect(select?.options?.map((option) => option.text.text)).toContain(
+      "Clear context / new session",
+    );
+    const modelOption = select?.options?.find((option) => option.text.text === "Change model");
+    expect(modelOption).toBeDefined();
+    const modelResponse = await runArgMenuAction(actionHandler, {
+      action: { selected_option: { value: modelOption!.value } },
+    });
+    const modelMenu = firstCallPayload(modelResponse, "models") as typeof menu;
+    const models = modelMenu.blocks.find((block) => block.type === "actions")?.elements?.[0];
+    expect(models?.type).toBe("static_select");
+    expect(models?.options?.map((option) => option.text.text)).toEqual([
+      "Test Alpha (openai)",
+      "test-beta (openai)",
+    ]);
+    await runArgMenuAction(actionHandler, {
+      action: { selected_option: { value: models!.options![1]!.value } },
+    });
+    expectSingleDispatchedSlashBody("/model openai/test-beta");
+  });
+
+  it.each(["think", "/think"])("opens thinking choices for /openclaw %s", async (text) => {
+    const single = createArgMenusHarness();
+    single.ctx.slashCommand.enabled = true;
+    await registerCommands(single.ctx, single.account);
+    const { respond } = await runCommandHandler([...single.commands.values()][0]!, { text });
+    const payload = firstCallPayload(respond, "thinking") as {
+      blocks: Array<{ type: string; elements?: Array<{ type: string }> }>;
+    };
+    expect(payload.blocks.find((block) => block.type === "actions")?.elements?.[0]?.type).toBe(
+      "static_select",
+    );
+    expect(dispatchMock).not.toHaveBeenCalled();
+  });
+
+  it("rejects another user's control menu selection", async () => {
+    const single = createArgMenusHarness();
+    single.ctx.slashCommand.enabled = true;
+    await registerCommands(single.ctx, single.account);
+    const response = await runArgMenuAction(
+      requireHandler(single.actions, /^openclaw_cmdarg/, "controls action"),
+      {
+        action: {
+          selected_option: {
+            value: encodeValue({ command: "controls", arg: "action", value: "new", userId: "U1" }),
+          },
+        },
+        userId: "U2",
+      },
+    );
+    expect(response).toHaveBeenCalledWith(
+      expect.objectContaining({ text: "That menu is for another user." }),
+    );
+    expect(dispatchMock).not.toHaveBeenCalled();
   });
 
   it("executes the exact selected plugin candidate with its native arguments", async () => {
@@ -494,6 +579,24 @@ describe("Slack native command argument menus", () => {
     ["slash response URL", "slash", false, undefined, undefined],
   ] as const)("preserves the %s reply budget", async (_name, source, webApi, message, threadTs) => {
     mockSixDispatchedReplies();
+    if (source === "action") {
+      // This test owns delivery budgeting; provide the recorded conversation owner
+      // that a real threaded menu has before command dispatch.
+      const routing = vi
+        .spyOn(sessionEventRouting, "resolveSlackSessionEventRoutingContext")
+        .mockImplementation(async (params) => {
+          const sessionSource = Object.assign(composeSessionEntryCommitGuards([]), {
+            assertScopeCurrent() {},
+          });
+          return {
+            ...(await sessionEventRouting.resolveSlackRoutingContext(params)),
+            isCurrentSession: Object.assign(async () => true, { sessionSource }),
+            sessionSource,
+            release() {},
+          };
+        });
+      onTestFinished(() => routing.mockRestore());
+    }
     const dispatchReplyFromConfig = vi.fn();
     if (source === "slash") {
       (harness.ctx as { dispatchReplyFromConfig?: unknown }).dispatchReplyFromConfig =

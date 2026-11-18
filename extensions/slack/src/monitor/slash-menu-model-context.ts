@@ -7,6 +7,30 @@ import { getSessionEntryAsync, resolveStorePath } from "openclaw/plugin-sdk/sess
 import { normalizeOptionalString } from "openclaw/plugin-sdk/string-coerce-runtime";
 import type { SlackMonitorContext } from "./context.js";
 
+export async function resolveSlackCommandModelChoices(params: {
+  cfg: SlackMonitorContext["cfg"];
+  agentId: string;
+  sessionKey: string;
+}): Promise<Array<{ value: string; label: string }>> {
+  const { buildPreparedModelsProviderData } =
+    await import("openclaw/plugin-sdk/models-provider-runtime");
+  const sessionEntry = await getSessionEntryAsync({
+    agentId: params.agentId,
+    storePath: resolveStorePath(params.cfg.session?.store, { agentId: params.agentId }),
+    sessionKey: params.sessionKey,
+  });
+  const data = await buildPreparedModelsProviderData(params.cfg, params.agentId, { sessionEntry });
+  if (data.isCurrent?.() === false) {
+    throw new Error("Available models changed. Open the model menu again.");
+  }
+  return data.providers.flatMap((provider) =>
+    [...(data.byProvider.get(provider) ?? [])].toSorted().map((model) => {
+      const value = `${provider}/${model}`;
+      return { value, label: `${data.modelNames.get(value) ?? model} (${provider})` };
+    }),
+  );
+}
+
 export async function resolveSlackCommandMenuModelContext(params: {
   cfg: SlackMonitorContext["cfg"];
   agentId: string;
